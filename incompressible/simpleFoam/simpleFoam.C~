@@ -39,7 +39,7 @@ Description
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-// argc: the number of arguments; *argv[]: the arguments e.g. simpleFoam -case caseFolder 
+// argc: the number of arguments; *argv[]: the arguments e.g. simpleFoam -case hhasl2D 
 int main(int argc, char *argv[])
 {
     #include "postProcess.H"
@@ -69,18 +69,16 @@ int main(int argc, char *argv[])
     {
         Info<< "Time = " << runTime.timeName() << nl << endl;
 
-        // --- Pressure-velocity SIMPLE corrector
+        // SIMPLE -- Calculates p and U fields
         {
             #include "UEqn.H"
             #include "pEqn.H"
         }
 
-	// there is a laminarTransport object and a member function -- find where the object is created and the class member function is implemented.
-
-//correct() is declared in singlePhaseTransportModel.H
+	// correct() is declared in singlePhaseTransportModel.H
         laminarTransport.correct();
 
-	// Solve the turbulence equations and correct the turbulence viscosity
+	// Turbulence Model -- Calculates k, epsilon and nut
         turbulence->correct();
 
 	// Write the fields to time directories
@@ -91,6 +89,7 @@ int main(int argc, char *argv[])
             << nl << endl;
     }
 
+    // Convergence!
     Info<< "End\n" << endl;
 
     return 0;

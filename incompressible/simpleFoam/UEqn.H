@@ -1,3 +1,5 @@
+// This is actually both UEqn.H and pEqn.H files //
+
     // Momentum predictor
 
     // Correct U boundary conditions
@@ -95,7 +97,7 @@ The setValue member function is used by fvOptions that are implemented as constr
 */
     fvOptions.constrain(UEqn);
 
-    // Solves momentum equations
+    // STEP 2 - Solve U equations
     if (simple.momentumPredictor())
     {
         solve(UEqn == -fvc::grad(p));
@@ -109,7 +111,8 @@ The setValue member function is used by fvOptions that are implemented as constr
     volScalarField rAU(1.0/UEqn.A());
     // Divides Hudson by a_p
     volVectorField HbyA(constrainHbyA(rAU*UEqn.H(), U, p));
-    // Calculates the fluxes for H/ap
+
+    // STEP 3 - Calculates the cell-face fluxes for H/ap
     surfaceScalarField phiHbyA("phiHbyA", fvc::flux(HbyA));
     MRF.makeRelative(phiHbyA);
     adjustPhi(phiHbyA, U, p);
@@ -129,7 +132,8 @@ The setValue member function is used by fvOptions that are implemented as constr
     // Update the pressure BCs to ensure flux consistency
     constrainPressure(p, U, phiHbyA, rAtU(), MRF);
 
-    // Non-orthogonal pressure corrector loop
+
+    // STEP 4 - Define and solve the pressure equation and repeat for the prescribed number of non-orthogonal corrector steps
     while (simple.correctNonOrthogonal())
     {
         fvScalarMatrix pEqn
@@ -137,23 +141,29 @@ The setValue member function is used by fvOptions that are implemented as constr
             fvm::laplacian(rAtU(), p) == fvc::div(phiHbyA)
         );
 
+	// Sets reference pressure (usually 0 for manometric analysis)
         pEqn.setReference(pRefCell, pRefValue);
 
+	// Solve p equation
         pEqn.solve();
 
         if (simple.finalNonOrthogonalIter())
         {
+	    // Correct the flux
             phi = phiHbyA - pEqn.flux();
         }
     }
 
+
     #include "continuityErrs.H"
 
-    // Explicitly relax pressure for momentum corrector
+    // Explicitly underrelax pressure for momentum corrector
     p.relax();
 
-    // Momentum corrector
+    // STEP 5 - Calculate U = H(U)/ap - grap(p)/ap
     U = HbyA - rAtU()*fvc::grad(p);
+    
+    // STEP 6 - Update BCs
     U.correctBoundaryConditions();
     fvOptions.correct(U);
 }

@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
 	// momentumPredictor just returns true -- parenthood sequence is: pisoControl.H -> pimpleControl.H -> solutionControl.H
         if (piso.momentumPredictor())
         {
-	    // STEP 1: Solves the U equation using p from previous timestep
+	    // STEP 2: Solves the U equation using p from previous timestep
             solve(UEqn == -fvc::grad(p));
         }
 
@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
             volScalarField rAU(1.0/UEqn.A()); //(ap_u)^-1 for every cell
             volVectorField HbyA(constrainHbyA(rAU*UEqn.H(), U, p)); // (ap_u)^-*H(u)
 
-	    // Calculate interpolated face fluxes from the approximate velocity field (corrected to be globally conservative so that there is a solution to the pressure equation) to be used in the fvc::div operator.
+	    // STEP 3 - Calculate interpolated face fluxes from the approximate velocity field (corrected to be globally conservative so that there is a solution to the pressure equation) to be used in the fvc::div operator.
 
             surfaceScalarField phiHbyA
             (
@@ -98,7 +98,8 @@ int main(int argc, char *argv[])
             // Update the pressure BCs to ensure flux consistency
             constrainPressure(p, U, phiHbyA, rAU);
 
-            // Non-orthogonal pressure corrector loop "nNonOrthogonalCorrects" times
+            
+
             while (piso.correctNonOrthogonal()) // correctNonOrthogonal() declared @ solutionControl.H
             {
                 // Pressure corrector equation
@@ -107,13 +108,12 @@ int main(int argc, char *argv[])
                     fvm::laplacian(rAU, p) == fvc::div(phiHbyA)
                 );
 
-		// ??
                 pEqn.setReference(pRefCell, pRefValue);
 
-		// Determine new pressure
+		// STEP 4 - Solve pressure equation
                 pEqn.solve(mesh.solver(p.select(piso.finalInnerIter())));
 
-		// Correct phi for the next pressure-corrector step
+		// STEP 5 - Correct mass-fluxes -- Non-orthogonal pressure corrector loop "nNonOrthogonalCorrects" times
                 if (piso.finalNonOrthogonalIter())
                 {
                     phi = phiHbyA - pEqn.flux();
@@ -122,10 +122,13 @@ int main(int argc, char *argv[])
 	    // Calculate and write continuity error
             #include "continuityErrs.H"
 
-	    // Correct U field and BCs with the corrected grad(p)
+	    // STEP 6 - Correct U field and BCs with the corrected grad(p)
             U = HbyA - rAU*fvc::grad(p);
+
+	    // STEP 7 - Update BCs
             U.correctBoundaryConditions();
-        } // this returs to // --- PISO loop --- //
+
+        } // STEP 8 - this returs to // --- PISO loop --- //
 
 
 
@@ -135,7 +138,7 @@ int main(int argc, char *argv[])
         Info<< "ExecutionTime = " << runTime.elapsedCpuTime() << " s"
             << "  ClockTime = " << runTime.elapsedClockTime() << " s"
             << nl << endl;
-    }
+    } // STEP 9 - advances in time //
 
     Info<< "End\n" << endl;
 
