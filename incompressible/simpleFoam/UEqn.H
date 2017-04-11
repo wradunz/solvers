@@ -1,0 +1,159 @@
+    // Momentum predictor
+
+    // Correct U boundary conditions
+    // MRF stands for Multiple Reference Frames and idk wtf
+    MRF.correctBoundaryVelocity(U);
+
+    // Defines U equation with optional source term fvOptions(U)
+    tmp<fvVectorMatrix> tUEqn
+    (
+        fvm::div(phi, U)
+      + MRF.DDt(U)
+      + turbulence->divDevReff(U)
+     ==
+        fvOptions(U)
+    );
+/*
+The divDevReff(U) function is neither implemented in the eddyViscosity class, so we have a look in the base class linearViscousStress. We can't find it there either, so we look in the base class, which is referred to as BasicTurbulenceModel (which we know is IncompressibleTurbulenceModel<transportModel> in our case).
+
+template<class TransportModel>
+Foam::tmp<Foam::fvVectorMatrix>
+Foam::IncompressibleTurbulenceModel<TransportModel>::divDevReff
+(
+ volVectorField& U
+) const
+{
+ return divDevRhoReff(U);
+}
+
+This in turn calls the divDevRhoReff(U) function, assuming that we are currently in the kEpsilon class. That function can't be found there, and neither in the eddyViscosity class, but in the linearViscousStress class ($FOAM_SRC//TurbulenceModels/turbulenceModels/linearViscousStress/linearViscousStress.C):
+
+template<class BasicTurbulenceModel>
+Foam::tmp<Foam::fvVectorMatrix>
+Foam::linearViscousStress<BasicTurbulenceModel>::divDevRhoReff
+(
+ volVectorField& U
+) const
+{
+ return
+ (
+ - fvc::div((this->alpha_*this->rho_*this->nuEff())*dev2(T(fvc::grad(U))))
+ - fvm::laplacian(this->alpha_*this->rho_*this->nuEff(), U)
+ );
+}
+
+We remember that for the incompressible case the density (rho_) was set to constant 1. The nuEff() function can NOT be found by the same search pattern as before: kEpsilon - eddyViscosity - linearViscousStress, but we recall that kEpsilon is a RASModel, and find the function in $FOAM_SRC/TurbulenceModels/turbulenceModels/RAS/RASModel/RASModel.H:
+
+ //- Return the effective viscosity
+ virtual tmp<volScalarField> nuEff() const
+ {
+ return tmp<volScalarField>
+ (
+ new volScalarField
+ (
+ IOobject::groupName("nuEff", this->U_.group()),
+ this->nut() + this->nu()
+ )
+ );
+ }
+The nut() function is implemented in eddyViscosity.H:
+
+ //- Return the turbulence viscosity
+ virtual tmp<volScalarField> nut() const
+ {
+ return nut_;
+ }
+We can imagine that the nu() function returns the laminar kinematic viscosity, and that the nuEff() function thus returns the sum of the turbulent and laminar kinematic viscosities.
+
+// ABOUT THE fvOptions() //
+
+We see that only the things that are special for the kEpsilon class are implemented in that class. The rest is implemented in the base classes. If we are to implement a special version of the kEpsilon model we need to focus on the kEpsilon.H and kEpsilon.C files.
+
+What looks like a constructor call "fvOptions(U)", is actually a call to the fv::optionList::operator()(GeometricField&)
+As the comment in the source code snippet above states, this operator template will return the source for the given equation, taking a geometric field as an argument. In the case of the simpleFoam solver, it is modifying the source of the momentum equation taking the velocity field U as an argument.
+
+The operator generates an fvMatrix to be returned, lists over all fvOptions activated by the constant or system/fvOptions dictionary file and modifies the equation source accordingly. All details of the implementation are not important beyond this point, as they are not relevant for solver modifications. When new fvOptions are to be implemented, some of the more low-level details become more important.
+
+The important thing to learn regarding the fv::optionList::operator() is that it loops over all active fvOptions and forwards a call to fv::option::addSup.
+
+The fv::option::addSup member function has a default implementation that does nothing and must be hidden in an implemented fvOption source to have an effect on the equation.
+
+
+
+*/
+    // Reference the momentum equation
+    fvVectorMatrix& UEqn = tUEqn.ref();
+
+    // Relaxes momentum equations
+    UEqn.relax();
+
+    /* To constrain the equation in this context, at least from examining the source code, means for the source term to apply modifications to psi field of the equation (fvMatrix) directly. The equation in OpenFOAM is actually a matrix of type fvMatrix (in the context of the Finite Volume Method). The equation (matrix) stores a constant reference the field that is being operated on – this class data member is named psi.
+
+The fv::optionList::constrain delegates the call to fvOption::setValue, which is by default not doing anything, for any fvOption
+
+The setValue member function is used by fvOptions that are implemented as constraints on the equation field, they are separated from fvOptions that act like equation sources, in the fvOptions/constraints sub-directory.
+*/
+    fvOptions.constrain(UEqn);
+
+    // Solves momentum equations
+    if (simple.momentumPredictor())
+    {
+        solve(UEqn == -fvc::grad(p));
+
+        fvOptions.correct(U);
+    }
+
+// Begins pEqn.H //
+{
+    // Defines a_p^-1
+    volScalarField rAU(1.0/UEqn.A());
+    // Divides Hudson by a_p
+    volVectorField HbyA(constrainHbyA(rAU*UEqn.H(), U, p));
+    // Calculates the fluxes for H/ap
+    surfaceScalarField phiHbyA("phiHbyA", fvc::flux(HbyA));
+    MRF.makeRelative(phiHbyA);
+    adjustPhi(phiHbyA, U, p);
+
+    tmp<volScalarField> rAtU(rAU);
+
+    if (simple.consistent())
+    {
+        rAtU = 1.0/(1.0/rAU - UEqn.H1());
+        phiHbyA +=
+            fvc::interpolate(rAtU() - rAU)*fvc::snGrad(p)*mesh.magSf();
+        HbyA -= (rAU - rAtU())*fvc::grad(p);
+    }
+
+    tUEqn.clear();
+
+    // Update the pressure BCs to ensure flux consistency
+    constrainPressure(p, U, phiHbyA, rAtU(), MRF);
+
+    // Non-orthogonal pressure corrector loop
+    while (simple.correctNonOrthogonal())
+    {
+        fvScalarMatrix pEqn
+        (
+            fvm::laplacian(rAtU(), p) == fvc::div(phiHbyA)
+        );
+
+        pEqn.setReference(pRefCell, pRefValue);
+
+        pEqn.solve();
+
+        if (simple.finalNonOrthogonalIter())
+        {
+            phi = phiHbyA - pEqn.flux();
+        }
+    }
+
+    #include "continuityErrs.H"
+
+    // Explicitly relax pressure for momentum corrector
+    p.relax();
+
+    // Momentum corrector
+    U = HbyA - rAtU()*fvc::grad(p);
+    U.correctBoundaryConditions();
+    fvOptions.correct(U);
+}

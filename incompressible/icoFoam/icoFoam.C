@@ -1,0 +1,146 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     |
+    \\  /    A nd           | Copyright (C) 2011-2016 OpenFOAM Foundation
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+License
+    This file is part of OpenFOAM.
+
+    OpenFOAM is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+
+Application
+    icoFoam
+
+Description
+    Transient solver for incompressible, laminar flow of Newtonian fluids.
+
+\*---------------------------------------------------------------------------*/
+
+// All class declarations needed
+#include "fvCFD.H"
+
+// Reads piso subdictionary of fvSolution
+#include "pisoControl.H"
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+int main(int argc, char *argv[])
+{
+    #include "setRootCase.H"
+    #include "createTime.H"
+    #include "createMesh.H"
+
+    // Constructs piso object and reads piso subdict @fvSolution
+    pisoControl piso(mesh);
+
+    #include "createFields.H"
+    #include "initContinuityErrs.H"
+
+    // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+    Info<< "\nStarting time loop\n" << endl;
+
+    while (runTime.loop())
+    {
+        Info<< "Time = " << runTime.timeName() << nl << endl;
+
+        #include "CourantNo.H"
+
+        // Momentum predictor
+	// Original momentum eqn without pressure gradient
+        fvVectorMatrix UEqn
+        (
+            fvm::ddt(U)
+          + fvm::div(phi, U)
+          - fvm::laplacian(nu, U)
+        );
+	// momentumPredictor just returns true -- parenthood sequence is: pisoControl.H -> pimpleControl.H -> solutionControl.H
+        if (piso.momentumPredictor())
+        {
+	    // STEP 1: Solves the U equation using p from previous timestep
+            solve(UEqn == -fvc::grad(p));
+        }
+
+
+
+
+        // --- PISO loop --- //
+
+        while (piso.correct()) //loop pressure corrector "nCorrectors" times declared @ pimpleControl.H
+        {
+            volScalarField rAU(1.0/UEqn.A()); //(ap_u)^-1 for every cell
+            volVectorField HbyA(constrainHbyA(rAU*UEqn.H(), U, p)); // (ap_u)^-*H(u)
+
+	    // Calculate interpolated face fluxes from the approximate velocity field (corrected to be globally conservative so that there is a solution to the pressure equation) to be used in the fvc::div operator.
+
+            surfaceScalarField phiHbyA
+            (
+                "phiHbyA",
+                fvc::flux(HbyA)
+              + fvc::interpolate(rAU)*fvc::ddtCorr(U, phi)
+            );
+
+            adjustPhi(phiHbyA, U, p);
+
+            // Update the pressure BCs to ensure flux consistency
+            constrainPressure(p, U, phiHbyA, rAU);
+
+            // Non-orthogonal pressure corrector loop "nNonOrthogonalCorrects" times
+            while (piso.correctNonOrthogonal()) // correctNonOrthogonal() declared @ solutionControl.H
+            {
+                // Pressure corrector equation
+                fvScalarMatrix pEqn
+                (
+                    fvm::laplacian(rAU, p) == fvc::div(phiHbyA)
+                );
+
+		// ??
+                pEqn.setReference(pRefCell, pRefValue);
+
+		// Determine new pressure
+                pEqn.solve(mesh.solver(p.select(piso.finalInnerIter())));
+
+		// Correct phi for the next pressure-corrector step
+                if (piso.finalNonOrthogonalIter())
+                {
+                    phi = phiHbyA - pEqn.flux();
+                }
+            }
+	    // Calculate and write continuity error
+            #include "continuityErrs.H"
+
+	    // Correct U field and BCs with the corrected grad(p)
+            U = HbyA - rAU*fvc::grad(p);
+            U.correctBoundaryConditions();
+        } // this returs to // --- PISO loop --- //
+
+
+
+
+        runTime.write();
+
+        Info<< "ExecutionTime = " << runTime.elapsedCpuTime() << " s"
+            << "  ClockTime = " << runTime.elapsedClockTime() << " s"
+            << nl << endl;
+    } // this ends the time loop //
+
+    Info<< "End\n" << endl;
+
+    return 0;
+}
+
+
+// ************************************************************************* //
